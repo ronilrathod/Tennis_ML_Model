@@ -44,6 +44,8 @@ class WimbledonPredictor:
         
         # Create features
         self.create_features()
+        # Calculate Elo ratings and add Elo features
+        self.wimbledon_data = self.calculate_elo_ratings(self.wimbledon_data)
         
     def create_features(self):
         """Create comprehensive features for Wimbledon prediction"""
@@ -200,6 +202,33 @@ class WimbledonPredictor:
         h2h_streak_p1 = streak
         return [h2h_matches, h2h_wins_p1, h2h_winrate_p1, h2h_recent_p1_win, h2h_streak_p1]
     
+    def calculate_elo_ratings(self, df, k=32, base_elo=1500):
+        elo_dict = {}
+        elo_p1_pre = []
+        elo_p2_pre = []
+        elo_win_prob_p1 = []
+        for idx, row in df.sort_values('Date').iterrows():
+            p1 = row['Player_1']
+            p2 = row['Player_2']
+            r1 = elo_dict.get(p1, base_elo)
+            r2 = elo_dict.get(p2, base_elo)
+            e1 = 1 / (1 + 10 ** ((r2 - r1) / 400))
+            e2 = 1 - e1
+            elo_p1_pre.append(r1)
+            elo_p2_pre.append(r2)
+            elo_win_prob_p1.append(e1)
+            s1 = 1 if row['Winner'] == p1 else 0
+            s2 = 1 - s1
+            r1_new = r1 + k * (s1 - e1)
+            r2_new = r2 + k * (s2 - e2)
+            elo_dict[p1] = r1_new
+            elo_dict[p2] = r2_new
+        df['elo_p1_pre'] = elo_p1_pre
+        df['elo_p2_pre'] = elo_p2_pre
+        df['elo_diff'] = df['elo_p1_pre'] - df['elo_p2_pre']
+        df['elo_win_prob_p1'] = elo_win_prob_p1
+        return df
+    
     def train_models(self):
         """Train prediction models"""
         print("Training Wimbledon prediction models...")
@@ -209,7 +238,8 @@ class WimbledonPredictor:
             "rank_diff", "odds_diff", "pts_diff", "odds_ratio", "prob_diff", "rank_ratio",
             "player1_grass_form", "player2_grass_form", "player1_grass_winrate", "player2_grass_winrate",
             "player1_recent_form", "player2_recent_form", "player1_bo5_experience", "player2_bo5_experience",
-            "h2h_matches", "h2h_wins_p1", "h2h_winrate_p1", "h2h_recent_p1_win", "h2h_streak_p1"
+            "h2h_matches", "h2h_wins_p1", "h2h_winrate_p1", "h2h_recent_p1_win", "h2h_streak_p1",
+            "elo_p1_pre", "elo_p2_pre", "elo_diff", "elo_win_prob_p1"
         ]
         
         # Prepare data
@@ -310,15 +340,18 @@ class WimbledonPredictor:
         
         # Get top players
         top_players_list = self.get_top_players(top_players)
+        # Get latest Elo for all players
+        latest_elo = self.get_latest_elo()
         
         print("Top Contenders for Wimbledon 2025:")
         print("-" * 80)
-        print(f"{'Rank':<4} {'Player':<25} {'Grass WR':<8} {'Form':<6} {'Rank':<6} {'Score':<6}")
+        print(f"{'Rank':<4} {'Player':<25} {'Grass WR':<8} {'Form':<6} {'Rank':<6} {'Elo':<6} {'Score':<6}")
         print("-" * 80)
         
         for i, player in enumerate(top_players_list, 1):
+            elo = latest_elo.get(player['player'], 1500)
             print(f"{i:<4} {player['player']:<25} {player['grass_winrate']:<8.3f} "
-                  f"{player['grass_form']:<6.3f} {player['current_rank']:<6} {player['wimbledon_score']:<6.3f}")
+                  f"{player['grass_form']:<6.3f} {player['current_rank']:<6} {elo:<6.0f} {player['wimbledon_score']:<6.3f}")
         
         # Simulate tournament bracket
         print(f"\n🏆 Tournament Simulation Results:")
@@ -387,17 +420,36 @@ class WimbledonPredictor:
             # Get champion details
             champion_data = next((p for p in top_players_list if p["player"] == champion), None)
             if champion_data:
+                champion_elo = latest_elo.get(champion, 1500)
                 print(f"\n📊 Champion Statistics:")
                 print(f"   Grass Court Win Rate: {champion_data['grass_winrate']:.1%}")
                 print(f"   Recent Grass Form: {champion_data['grass_form']:.1%}")
                 print(f"   Overall Recent Form: {champion_data['recent_form']:.1%}")
                 print(f"   Current Ranking: #{champion_data['current_rank']}")
                 print(f"   Best-of-5 Experience: {champion_data['bo5_experience']} matches")
+                print(f"   Elo Rating: {champion_elo:.0f}")
         
         return champion if final_ranking else None
     
+    def get_latest_elo(self):
+        # Build a dict of latest Elo for each player from all matches
+        elo_dict = {}
+        for idx, row in self.wimbledon_data.sort_values('Date').iterrows():
+            p1 = row['Player_1']
+            p2 = row['Player_2']
+            r1 = elo_dict.get(p1, 1500)
+            r2 = elo_dict.get(p2, 1500)
+            e1 = 1 / (1 + 10 ** ((r2 - r1) / 400))
+            e2 = 1 - e1
+            s1 = 1 if row['Winner'] == p1 else 0
+            s2 = 1 - s1
+            r1_new = r1 + 32 * (s1 - e1)
+            r2_new = r2 + 32 * (s2 - e2)
+            elo_dict[p1] = r1_new
+            elo_dict[p2] = r2_new
+        return elo_dict
+
     def create_matchup_features(self, player1, player2):
-        """Create feature vector for a matchup between two players"""
         try:
             rank_diff = player1["current_rank"] - player2["current_rank"]
             odds_diff = 0
@@ -414,11 +466,17 @@ class WimbledonPredictor:
             player1_bo5_experience = player1["bo5_experience"]
             player2_bo5_experience = player2["bo5_experience"]
             h2h_feats = self.calculate_h2h_features(self.df, player1["player"], player2["player"])
+            # Elo features
+            latest_elo = self.get_latest_elo()
+            elo_p1 = latest_elo.get(player1["player"], 1500)
+            elo_p2 = latest_elo.get(player2["player"], 1500)
+            elo_diff = elo_p1 - elo_p2
+            elo_win_prob_p1 = 1 / (1 + 10 ** ((elo_p2 - elo_p1) / 400))
             features = [
                 rank_diff, odds_diff, pts_diff, odds_ratio, prob_diff, rank_ratio,
                 player1_grass_form, player2_grass_form, player1_grass_winrate, player2_grass_winrate,
                 player1_recent_form, player2_recent_form, player1_bo5_experience, player2_bo5_experience
-            ] + h2h_feats
+            ] + h2h_feats + [elo_p1, elo_p2, elo_diff, elo_win_prob_p1]
             return features
         except Exception as e:
             print(f"Error creating features: {e}")
