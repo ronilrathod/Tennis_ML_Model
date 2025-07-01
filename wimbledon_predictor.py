@@ -4,6 +4,7 @@ from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier
 from sklearn.model_selection import cross_val_score
 from sklearn.preprocessing import StandardScaler
 import warnings
+from xgboost import XGBClassifier
 warnings.filterwarnings('ignore')
 
 class WimbledonPredictor:
@@ -252,24 +253,32 @@ class WimbledonPredictor:
         # Train models
         self.gb_model = GradientBoostingClassifier(n_estimators=300, random_state=42, max_depth=6)
         self.rf_model = RandomForestClassifier(n_estimators=200, random_state=42, max_depth=10)
+        self.xgb_model = XGBClassifier(n_estimators=300, max_depth=8, learning_rate=0.05, random_state=42, use_label_encoder=False, eval_metric='logloss')
         
         self.gb_model.fit(X, y)
         self.rf_model.fit(X, y)
+        self.xgb_model.fit(X, y)
         
         # Cross-validation scores
         gb_cv = cross_val_score(self.gb_model, X, y, cv=5)
         rf_cv = cross_val_score(self.rf_model, X, y, cv=5)
+        xgb_cv = cross_val_score(self.xgb_model, X, y, cv=5)
         
         print(f"Gradient Boosting CV Accuracy: {gb_cv.mean():.3f} (+/- {gb_cv.std() * 2:.3f})")
         print(f"Random Forest CV Accuracy: {rf_cv.mean():.3f} (+/- {rf_cv.std() * 2:.3f})")
+        print(f"XGBoost CV Accuracy: {xgb_cv.mean():.3f} (+/- {xgb_cv.std() * 2:.3f})")
         
-        # Choose the better model
-        if gb_cv.mean() > rf_cv.mean():
-            self.best_model = self.gb_model
-            self.model_name = "Gradient Boosting"
-        else:
+        # Use the best model
+        best_score = max(gb_cv.mean(), rf_cv.mean(), xgb_cv.mean())
+        if xgb_cv.mean() == best_score:
+            self.best_model = self.xgb_model
+            self.model_name = "XGBoost"
+        elif rf_cv.mean() == best_score:
             self.best_model = self.rf_model
             self.model_name = "Random Forest"
+        else:
+            self.best_model = self.gb_model
+            self.model_name = "Gradient Boosting"
         
         print(f"Selected model: {self.model_name}")
     
