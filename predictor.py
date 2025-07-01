@@ -46,6 +46,38 @@ def calculate_elo_ratings(df, k=32, base_elo=1500):
     df['elo_win_prob_p1'] = elo_win_prob_p1
     return df
 
+def calculate_surface_elo_ratings(df, k=32, base_elo=1500):
+    # Maintain Elo per player per surface
+    surface_elo_dict = {}
+    elo_p1_surface = []
+    elo_p2_surface = []
+    elo_surface_win_prob_p1 = []
+    for idx, row in df.sort_values('Date').iterrows():
+        p1 = row['Player_1']
+        p2 = row['Player_2']
+        surface = row['Surface']
+        # Elo for player/surface tuple
+        key1 = (p1, surface)
+        key2 = (p2, surface)
+        r1 = surface_elo_dict.get(key1, base_elo)
+        r2 = surface_elo_dict.get(key2, base_elo)
+        e1 = 1 / (1 + 10 ** ((r2 - r1) / 400))
+        e2 = 1 - e1
+        elo_p1_surface.append(r1)
+        elo_p2_surface.append(r2)
+        elo_surface_win_prob_p1.append(e1)
+        s1 = 1 if row['Winner'] == p1 else 0
+        s2 = 1 - s1
+        r1_new = r1 + k * (s1 - e1)
+        r2_new = r2 + k * (s2 - e2)
+        surface_elo_dict[key1] = r1_new
+        surface_elo_dict[key2] = r2_new
+    df['elo_p1_surface'] = elo_p1_surface
+    df['elo_p2_surface'] = elo_p2_surface
+    df['elo_surface_diff'] = df['elo_p1_surface'] - df['elo_p2_surface']
+    df['elo_surface_win_prob_p1'] = elo_surface_win_prob_p1
+    return df
+
 def calculate_h2h_features(df, player1, player2, up_to_date=None):
     h2h = df[
         (((df["Player_1"] == player1) & (df["Player_2"] == player2)) |
@@ -149,12 +181,14 @@ print("Calculating player statistics...")
 df = create_features(df)
 df = add_player_stats(df)
 df = calculate_elo_ratings(df)
+df = calculate_surface_elo_ratings(df)
 
 feature_columns = [
     "rank_diff", "odds_diff", "pts_diff", "odds_ratio", "prob_diff", "rank_ratio",
     "player1_form", "player2_form", "player1_surface_winrate", "player2_surface_winrate",
     "h2h_matches", "h2h_wins_p1", "h2h_winrate_p1", "h2h_recent_p1_win", "h2h_streak_p1",
-    "elo_p1_pre", "elo_p2_pre", "elo_diff", "elo_win_prob_p1"
+    "elo_p1_pre", "elo_p2_pre", "elo_diff", "elo_win_prob_p1",
+    "elo_p1_surface", "elo_p2_surface", "elo_surface_diff", "elo_surface_win_prob_p1"
 ]
 
 X = df[feature_columns].fillna(0)
@@ -187,14 +221,36 @@ def get_latest_elo():
         elo_dict[p2] = r2_new
     return elo_dict
 
-def predict_match_winner(player1_input, player2_input, surface="hard"):
+def get_latest_surface_elo(surface):
+    surface_elo_dict = {}
+    for idx, row in df.sort_values('Date').iterrows():
+        p1 = row['Player_1']
+        p2 = row['Player_2']
+        s = row['Surface']
+        key1 = (p1, s)
+        key2 = (p2, s)
+        r1 = surface_elo_dict.get(key1, 1500)
+        r2 = surface_elo_dict.get(key2, 1500)
+        e1 = 1 / (1 + 10 ** ((r2 - r1) / 400))
+        s1 = 1 if row['Winner'] == p1 else 0
+        r1_new = r1 + 32 * (s1 - e1)
+        r2_new = r2 + 32 * ((1-s1) - (1-e1))
+        surface_elo_dict[key1] = r1_new
+        surface_elo_dict[key2] = r2_new
+    # Return a dict of player:elo for the given surface
+    return {k[0]: v for k, v in surface_elo_dict.items() if k[1] == surface}
+
+def predict_match_winner(player1_input, player2_input, surface="hard", return_details=False):
     def get_best_match(name):
         matches = difflib.get_close_matches(name, player_names, n=1, cutoff=0.3)
         return matches[0] if matches else None
     player1 = get_best_match(player1_input)
     player2 = get_best_match(player2_input)
     if not player1 or not player2:
-        return f"No close match found for: {'player1' if not player1 else ''} {'player2' if not player2 else ''}"
+        msg = f"No close match found for: {'player1' if not player1 else ''} {'player2' if not player2 else ''}"
+        if return_details:
+            return {"winner": None, "confidence": 0.0, "result": msg}
+        return msg
     def get_latest_stats(player):
         matches = df[(df["Player_1"] == player) | (df["Player_2"] == player)]
         if matches.empty:
@@ -225,7 +281,10 @@ def predict_match_winner(player1_input, player2_input, surface="hard"):
     stats1 = get_latest_stats(player1)
     stats2 = get_latest_stats(player2)
     if not stats1 or not stats2:
-        return "Insufficient player data to predict"
+        msg = "Insufficient player data to predict"
+        if return_details:
+            return {"winner": None, "confidence": 0.0, "result": msg}
+        return msg
     # Calculate features
     rank_diff = stats1["rank"] - stats2["rank"]
     odds_diff = stats1["odds"] - stats2["odds"]
@@ -245,9 +304,15 @@ def predict_match_winner(player1_input, player2_input, surface="hard"):
     elo_p2 = latest_elo.get(player2, 1500)
     elo_diff = elo_p1 - elo_p2
     elo_win_prob_p1 = 1 / (1 + 10 ** ((elo_p2 - elo_p1) / 400))
+    # Surface-specific Elo
+    latest_surface_elo = get_latest_surface_elo(surface)
+    elo_p1_surface = latest_surface_elo.get(player1, 1500)
+    elo_p2_surface = latest_surface_elo.get(player2, 1500)
+    elo_surface_diff = elo_p1_surface - elo_p2_surface
+    elo_surface_win_prob_p1 = 1 / (1 + 10 ** ((elo_p2_surface - elo_p1_surface) / 400))
     features = np.array([[rank_diff, odds_diff, pts_diff, odds_ratio, prob_diff, rank_ratio,
         player1_form, player2_form, player1_surface_winrate, player2_surface_winrate] +
-        h2h_feats + [elo_p1, elo_p2, elo_diff, elo_win_prob_p1]])
+        h2h_feats + [elo_p1, elo_p2, elo_diff, elo_win_prob_p1, elo_p1_surface, elo_p2_surface, elo_surface_diff, elo_surface_win_prob_p1]])
     proba = model.predict_proba(features)[0]
     pred = model.predict(features)[0]
     winner = player1 if pred == 1 else player2
@@ -261,13 +326,29 @@ def predict_match_winner(player1_input, player2_input, surface="hard"):
         insights.append(f"Recent form difference ({abs(player1_form - player2_form):.2f})")
     if abs(elo_diff) > 50:
         insights.append(f"Elo difference ({elo_diff:.0f})")
+    if abs(elo_surface_diff) > 50:
+        insights.append(f"Surface Elo difference ({elo_surface_diff:.0f})")
     result = f"Predicted winner: {winner} (Confidence: {confidence:.2%})\n"
     result += f"Model used: {'XGBoost' if xgb_available else 'GradientBoosting'}\n"
     result += f"Surface: {surface.capitalize()}\n"
     result += f"Elo: {player1}={elo_p1:.0f}, {player2}={elo_p2:.0f}\n"
+    result += f"Surface Elo: {player1}={elo_p1_surface:.0f}, {player2}={elo_p2_surface:.0f}\n"
     if insights:
         result += f"Key factors: {', '.join(insights)}"
+    if return_details:
+        return {"winner": winner, "confidence": confidence, "result": result}
     return result
+
+# Symmetric prediction: always return the player with the higher win probability
+
+def predict_match_winner_symmetric(player1_input, player2_input, surface="hard"):
+    res1 = predict_match_winner(player1_input, player2_input, surface, return_details=True)
+    res2 = predict_match_winner(player2_input, player1_input, surface, return_details=True)
+    # If both are valid, pick the one with higher confidence
+    if res1["confidence"] > res2["confidence"]:
+        return res1["result"]
+    else:
+        return res2["result"]
 
 if __name__ == "__main__":
     print("=== Universal Tennis Match Predictor ===\n")
@@ -280,5 +361,5 @@ if __name__ == "__main__":
     if surface not in ["hard", "grass", "clay"]:
         surface = "hard"
         print("Defaulting to hard surface")
-    result = predict_match_winner(p1, p2, surface)
+    result = predict_match_winner_symmetric(p1, p2, surface)
     print(f"\n{result}")
